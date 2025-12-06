@@ -113,6 +113,7 @@ class RecommenderApp:
         main_paned_window = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         main_paned_window.pack(fill="both", expand=True)
 
+        # LEFT side: controls in scrollable frame
         control_scroll = ScrollableFrame(main_paned_window)
         control_frame = control_scroll.scrollable_frame
         main_paned_window.add(control_scroll, weight=0)
@@ -221,12 +222,28 @@ class RecommenderApp:
         self.user_selector.pack(fill="x", pady=(0, 15))
 
         ttk.Button(
+            self.cf_input_frame,
+            text="Manage this listener's liked songs",
+            command=self.open_liked_songs_manager,
+            style="TButton",
+        ).pack(fill="x", pady=(0, 10))
+
+        self.view_likes_button = ttk.Button(
+            self.cf_input_frame,
+            text="View this listener's liked songs",
+            command=self.show_liked_songs,
+            style="TButton",
+        )
+        self.view_likes_button.pack(fill="x", pady=(0, 10))
+
+        ttk.Button(
             control_frame,
             text="GET SUGGESTIONS",
             command=self.run_recommendation,
             style="TButton",
         ).pack(pady=(10, 10), fill="x")
 
+        # RIGHT side: results
         results_frame = ttk.Frame(main_paned_window, padding="10")
         main_paned_window.add(results_frame, weight=1)
 
@@ -254,10 +271,122 @@ class RecommenderApp:
         )
         self.details_label.pack(fill="x", pady=(10, 0), anchor="w")
 
+        # For the "liked songs manager" window
+        self.likes_manager_window = None
+        self.likes_manager_listbox = None
+        self.likes_manager_tracks = []
+        self.likes_manager_listener = None
+
+    def open_liked_songs_manager(self):
+        """Open a small window showing this listener's liked songs and allow removals."""
+        listener = self.user_selector.get().strip()
+        if not listener:
+            messagebox.showwarning(
+                "No listener selected", "Please choose a listener first."
+            )
+            return
+
+        df, error = self.model.get_liked_tracks_for_listener(listener)
+        if error:
+            messagebox.showerror("MongoDB error", error)
+            return
+
+        if df is None or df.empty:
+            messagebox.showinfo(
+                "No liked songs",
+                f"{listener} has no liked songs stored yet.",
+            )
+            return
+
+        if self.likes_manager_window is not None and self.likes_manager_window.winfo_exists():
+            self.likes_manager_window.destroy()
+
+        win = tk.Toplevel(self.master)
+        win.title(f"{listener}'s liked songs")
+        win.geometry("550x400")
+        win.configure(bg="#f0f0f0")
+        self.likes_manager_window = win
+        self.likes_manager_listener = listener
+
+        ttk.Label(
+            win,
+            text=f"Liked songs for {listener}",
+            style="Header.TLabel",
+        ).pack(pady=5, anchor="center")
+
+        listbox = tk.Listbox(
+            win,
+            height=15,
+            width=70,
+            exportselection=False,
+        )
+        listbox.pack(fill="both", expand=True, padx=10, pady=5)
+        self.likes_manager_listbox = listbox
+
+        self.likes_manager_tracks = list(df.index)
+
+        for tid, row in df.iterrows():
+            display = f"{row['Track']} – {row['Artist']} ({row['playlist_genre']})"
+            listbox.insert(tk.END, display)
+
+        ttk.Button(
+            win,
+            text="Remove selected song from likes",
+            command=self.remove_selected_like,
+            style="TButton",
+        ).pack(pady=10)
+
+    def remove_selected_like(self):
+        """Remove the selected song from the current listener's liked songs."""
+        if not self.likes_manager_window or not self.likes_manager_listbox:
+            return
+
+        selection = self.likes_manager_listbox.curselection()
+        if not selection:
+            messagebox.showwarning(
+                "No song selected",
+                "Please select a song to remove from this listener's likes.",
+            )
+            return
+
+        idx = selection[0]
+        track_id = self.likes_manager_tracks[idx]
+        listener = self.likes_manager_listener
+
+        confirm = messagebox.askyesno(
+            "Confirm removal",
+            f"Remove this song from {listener}'s liked songs?",
+        )
+        if not confirm:
+            return
+
+        error = self.model.remove_like_for_listener(listener, track_id)
+        if error:
+            messagebox.showerror("MongoDB error", error)
+            return
+
+        self.likes_manager_listbox.delete(idx)
+        del self.likes_manager_tracks[idx]
+
+        matrix_error = self.model.build_user_item_matrix_from_mongo()
+        if matrix_error:
+            messagebox.showwarning("Matrix warning", matrix_error)
+
+        self._refresh_listener_lists()
+
+        if self.likes_manager_listbox.size() == 0:
+            messagebox.showinfo(
+                "No more liked songs",
+                f"{listener} has no more liked songs.",
+            )
+            self.likes_manager_window.destroy()
+            self.likes_manager_window = None
+
     def _setup_evaluation_tab(self, parent):
         eval_paned_window = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         eval_paned_window.pack(fill="both", expand=True)
 
+        # LEFT: controls + text (with its own scrollbar)
         metrics_frame = ttk.Frame(eval_paned_window, width=320, padding="10")
         eval_paned_window.add(metrics_frame, weight=0)
 
@@ -293,18 +422,28 @@ class RecommenderApp:
             style="Header.TLabel",
         ).pack(anchor="w")
 
+        # Text + scrollbar container
+        text_frame = ttk.Frame(metrics_frame)
+        text_frame.pack(fill="both", expand=True, pady=(5, 10))
+
+        text_scroll = ttk.Scrollbar(text_frame, orient="vertical")
         self.eval_text = tk.Text(
-            metrics_frame,
+            text_frame,
             height=15,
             width=40,
             state=tk.DISABLED,
             wrap=tk.WORD,
             font=("Courier", 10),
+            yscrollcommand=text_scroll.set,
         )
-        self.eval_text.pack(fill="x", pady=(5, 10))
+        text_scroll.config(command=self.eval_text.yview)
+        self.eval_text.pack(side="left", fill="both", expand=True)
+        text_scroll.pack(side="right", fill="y")
 
-        plot_container = ttk.Frame(eval_paned_window, padding="10")
-        eval_paned_window.add(plot_container, weight=1)
+        # RIGHT: plots inside a scrollable frame
+        plot_scroll = ScrollableFrame(eval_paned_window)
+        plot_container = plot_scroll.scrollable_frame
+        eval_paned_window.add(plot_scroll, weight=1)
 
         ttk.Label(
             plot_container,
@@ -312,6 +451,7 @@ class RecommenderApp:
             style="Header.TLabel",
         ).pack(pady=(5, 10), anchor="w")
 
+        # Bar chart: AP@10 scores
         self.fig, self.ax = plt.subplots(figsize=(6, 4))
         self.ax.set_title("Recommendation quality (AP@10)", fontsize=12)
         self.ax.set_ylim(0, 1.0)
@@ -324,6 +464,15 @@ class RecommenderApp:
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(fill="both", expand=True)
 
+        # Second plot: listener's favourite genres (blue)
+        self.fig_genres, self.ax_genres = plt.subplots(figsize=(6, 3))
+        self.ax_genres.set_title("Listener's top liked genres", fontsize=12)
+        self.ax_genres.set_ylabel("Count")
+
+        self.canvas_genres = FigureCanvasTkAgg(self.fig_genres, master=plot_container)
+        self.canvas_genres_widget = self.canvas_genres.get_tk_widget()
+        self.canvas_genres_widget.pack(fill="both", expand=True, pady=(10, 0))
+
     def _initial_load(self):
         self._search_tracks(None)
         if self.track_listbox.size() > 0:
@@ -335,6 +484,7 @@ class RecommenderApp:
         mode = self.model_choice.get()
 
         if mode == "Song-Based":
+            # Show TRACK INPUT (search bar) + name + like button
             if not self.name_label.winfo_ismapped():
                 self.name_label.pack(anchor="w")
                 self.listener_name_entry.pack(anchor="w", pady=(0, 5))
@@ -344,7 +494,8 @@ class RecommenderApp:
             self.cf_input_frame.pack_forget()
             self.cbf_input_frame.pack(fill="x")
 
-        else:
+        elif mode == "People-Based":
+            # Hide like button + name entry, show listener selector
             if self.add_button.winfo_ismapped():
                 self.add_button.pack_forget()
             if self.name_label.winfo_ismapped():
@@ -443,6 +594,31 @@ class RecommenderApp:
         )
         self.details_label.config(text=details)
 
+    def show_liked_songs(self):
+        user = self.user_selector.get().strip()
+        if not user:
+            messagebox.showwarning(
+                "Missing listener", "Please choose a listener from the list first."
+            )
+            return
+
+        liked_df, error = self.model.get_liked_tracks_for_listener(user)
+
+        if error:
+            messagebox.showinfo("Liked songs", error)
+            self.results_text.config(state=tk.NORMAL)
+            self.results_text.delete(1.0, tk.END)
+            self.results_text.insert(tk.END, f"{error}")
+            self.results_text.config(state=tk.DISABLED)
+            return
+
+        self._update_results_text(
+            f"{user}'s liked songs",
+            liked_df,
+            "Saved likes",
+        )
+        self._update_details_panel_for_people_based(user)
+
     def add_song_to_listener(self):
         name = self.current_listener_name.get().strip()
         if not name:
@@ -509,7 +685,7 @@ class RecommenderApp:
             )
             self._update_details_panel_for_song_based(seed_id)
 
-        else:
+        elif mode == "People-Based":
             if not self.model.get_listener_names():
                 messagebox.showwarning(
                     "No listeners", "Please add at least one listener with liked songs."
@@ -576,8 +752,10 @@ class RecommenderApp:
 
         k = 10
         cbf_seed_track_id = user_likes.index[0]
+
         song_based_score, song_error = self.model.evaluate_model(
             self.model.get_content_based_recommendations,
+            test_user_id=test_user,
             test_track_id=cbf_seed_track_id,
             k=k,
         )
@@ -656,6 +834,57 @@ class RecommenderApp:
 
         self.fig.tight_layout()
         self.canvas.draw()
+
+        self._update_genre_plot(test_user)
+
+    def _update_genre_plot(self, user_id: str):
+        if (
+            self.model.user_item_matrix is None
+            or user_id not in self.model.user_item_matrix.index
+        ):
+            self.ax_genres.clear()
+            self.ax_genres.set_title("Listener's top liked genres", fontsize=12)
+            self.ax_genres.text(
+                0.5,
+                0.5,
+                "No data",
+                ha="center",
+                va="center",
+                transform=self.ax_genres.transAxes,
+            )
+            self.fig_genres.tight_layout()
+            self.canvas_genres.draw()
+            return
+
+        user_likes = self.model.user_item_matrix.loc[user_id]
+        liked_ids = user_likes[user_likes > 0].index.tolist()
+
+        self.ax_genres.clear()
+        self.ax_genres.set_title("Listener's top liked genres", fontsize=12)
+
+        if not liked_ids:
+            self.ax_genres.text(
+                0.5,
+                0.5,
+                "This listener has no liked songs yet.",
+                ha="center",
+                va="center",
+                transform=self.ax_genres.transAxes,
+            )
+        else:
+            genre_counts = (
+                self.model.df.loc[liked_ids, "playlist_genre"]
+                .value_counts()
+                .head(8)
+            )
+            self.ax_genres.bar(genre_counts.index, genre_counts.values)
+            self.ax_genres.set_ylabel("Count")
+            self.ax_genres.set_xticklabels(
+                genre_counts.index, rotation=30, ha="right"
+            )
+
+        self.fig_genres.tight_layout()
+        self.canvas_genres.draw()
 
 
 if __name__ == "__main__":
